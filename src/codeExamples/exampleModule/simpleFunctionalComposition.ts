@@ -17,5 +17,15 @@ export interface CalculateOptions {
   action: CalculateAction;
 }
 
+/**
+ * Given two numbers `a` and `b`, calculate an operation on them,
+ * `a` being the first operator, and `b` being the second operator.
+ *
+ * @example
+ * calculate({ a: 1, b: 2, action: "add" }) // 3
+ * calculate({ a: 1, b: 2, action: "subtract" }) // -1
+ * calculate({ a: 1, b: 2, action: "divide" }) // 0.5
+ * calculate({ a: 1, b: 2, action: "multiply" }) // 2
+ */
 export const calculate = ({ a, b, action }: CalculateOptions) =>
   CALCULATE_ACTION_CONFIG[action](a, b);
