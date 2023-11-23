@@ -1,4 +1,5 @@
 {
+  "extends": "./tsconfig.parent.json",
   "compilerOptions": {
     "resolveJsonModule": true,
     "lib": ["ESNext", "DOM"],
@@ -9,7 +10,6 @@
     "downlevelIteration": true,
     "strictNullChecks": true,
     "strict": true,
-    "types": ["jest"],
     "noImplicitAny": true,
     "skipLibCheck": true,
     "allowSyntheticDefaultImports": true,
