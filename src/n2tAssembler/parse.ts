@@ -1,10 +1,13 @@
+import { create } from "lodash";
 import { curry } from "../lib/curry";
-import { AssemblerState, InstructionPartType, createError } from "./state";
+import { createLogger } from "./logger";
+import { AssemblerState, AssemblyInstructionKind, createError } from "./state";
 
 type StateChanger = (
   state: AssemblerState,
   char: string,
-  prevChar: string | undefined
+  prevChar: string | undefined,
+  nextChar: string | undefined
 ) => void;
 
 const doNothing = () => {};
@@ -22,14 +25,110 @@ const throwIllegal = curry(
 
 const throwDefaultIllegal = throwIllegal("");
 
+const detectComment: StateChanger = (state, char, prevChar, nextChar) => {
+  if (
+    (char === "/" && nextChar === "/") ||
+    (char === "/" && prevChar === "/")
+  ) {
+    state.currentInstruction = {
+      kind: "comment",
+      value: "",
+    };
+  } else {
+    throwDefaultIllegal(state, char);
+  }
+};
+
+const finalizeInstruction = (
+  state: AssemblerState,
+  newLineRequired: boolean
+) => {
+  state.currentInstruction = {
+    kind: newLineRequired ? "nullAwaitingNewLine" : "null",
+    value: "",
+  };
+
+  state.previousInstruction = {
+    kind: "null",
+    value: "",
+  };
+};
+
+const addToInstructionValue = (state: AssemblerState, char: string) => {
+  state.currentInstruction.value += char;
+};
+
+const createAInstruction = (state: AssemblerState, value: string) => {
+  if (value.match(/^\d+$/)) {
+    state.result.instructions.push({
+      kind: "A",
+      value: parseInt(value, 10),
+      metadata: {},
+    });
+  } else {
+    if (state.result.symbols[value]) {
+      state.result.instructions.push({
+        kind: "A",
+        value: state.result.symbols[value].address,
+        metadata: {
+          symbol: value,
+          initial: false,
+        },
+      });
+    } else {
+      const address = state.nextSymbolAddress;
+      state.nextSymbolAddress++;
+
+      state.result.instructions.push({
+        kind: "A",
+        value: address,
+        metadata: {
+          symbol: value,
+          initial: true,
+        },
+      });
+    }
+  }
+};
+
+const C_PATTERN = /((?<destination>[ADM]+)(=(?<operandA>-?1|[ADM0])((?<operator>[+-])(?<operandB>[ADM01]))?)|(?<loneComp>[ADM01]{1}))(;(?<jump>J(GT|GE|LT|LE|NE|EQ|MP)))?/
+const createCInstruction = (state: AssemblerState, value: string) => {
+  const match = value.match(C_PATTERN)
+
+  if(!match){
+    throw new Error(`Invalid C instruction at line ${state.line + 1}:\n${value}`)
+  }
+
+  const {
+    loneComp,
+    destination,
+    operandA,
+    operandB,
+    operator,
+    jump
+  } = match.groups as {
+    loneComp?: string
+    destination?: string
+    operandA?: string
+    operandB?: string
+    operator?: string
+    jump?: string
+  }
+
+  if(loneComp){
+    
+  }
+};
+
 const HANDLERS: Record<
-  InstructionPartType,
+  AssemblyInstructionKind,
   Record<
     | "space"
     | "newLine"
     | "backslash"
     | "at"
     | "equal"
+    | "operator"
     | "digit"
     | "alpha"
     | "semicolon"
@@ -44,92 +143,144 @@ const HANDLERS: Record<
     newLine: doNothing,
     at: (state) => {
       state.currentInstruction = {
-        partType: "A",
+        kind: "A",
         value: "",
       };
     },
-    backslash: (state, _char, prevChar) => {
-      if (prevChar === "/") {
+    backslash: detectComment,
+    equal: throwDefaultIllegal,
+    operator: throwDefaultIllegal,
+    digit: (state, char) => {
+      if (["0", "1"].includes(char)) {
         state.currentInstruction = {
-          partType: "comment",
-          value: "",
+          kind: "C",
+          value: char,
+        };
+      } else {
+        throwDefaultIllegal(state, char);
+      }
+    },
+    alpha: (state, char) => {
+      if (["A", "M", "D"].includes(char)) {
+        state.currentInstruction = {
+          kind: "C",
+          value: state.currentInstruction.value + char,
         };
       }
     },
-    equal: throwDefaultIllegal,
-    digit: (state) => {},
-    alpha: (state) => {},
-    semicolon: (state) => {},
-    paren: (state) => {},
+    semicolon: throwDefaultIllegal,
+    paren: (state) => {
+      state.currentInstruction = {
+        kind: "label",
+        value: "",
+      };
+    },
     star: (state, _char, prevChar) => {
       if (prevChar === "/") {
         state.currentInstruction = {
-          partType: "multilineComment",
+          kind: "multilineComment",
           value: "",
         };
       }
     },
     other: throwDefaultIllegal,
   },
-  comment: {
+  nullAwaitingNewLine: {
     space: doNothing,
     newLine: (state) => {
-      if (state.currentInstruction.partType === "comment") {
-        state.currentInstruction = {
-          partType: "null",
-          value: "",
-        };
+      state.currentInstruction = {
+        kind: "null",
+        value: "",
+      };
+    },
+    at: throwDefaultIllegal,
+    backslash: detectComment,
+    equal: throwDefaultIllegal,
+    operator: throwDefaultIllegal,
+    digit: throwDefaultIllegal,
+    alpha: throwDefaultIllegal,
+    semicolon: throwDefaultIllegal,
+    paren: throwDefaultIllegal,
+    star: throwDefaultIllegal,
+    other: throwDefaultIllegal,
+  },
+  comment: {
+    space: addToInstructionValue,
+    newLine: (state) => {
+      if (state.currentInstruction.kind === "comment") {
+        finalizeInstruction(
+          state,
+          state.previousInstruction.kind === "nullAwaitingNewLine"
+        );
       }
     },
-    at: doNothing,
-    equal: doNothing,
-    backslash: doNothing,
-    digit: doNothing,
-    alpha: doNothing,
-    semicolon: doNothing,
-    paren: doNothing,
-    star: doNothing,
-    other: doNothing,
+    at: addToInstructionValue,
+    equal: addToInstructionValue,
+    operator: addToInstructionValue,
+    backslash: addToInstructionValue,
+    digit: addToInstructionValue,
+    alpha: addToInstructionValue,
+    semicolon: addToInstructionValue,
+    paren: addToInstructionValue,
+    star: addToInstructionValue,
+    other: addToInstructionValue,
   },
   multilineComment: {
-    space: doNothing,
-    newLine: doNothing,
-    at: doNothing,
+    space: addToInstructionValue,
+    newLine: addToInstructionValue,
+    at: addToInstructionValue,
     backslash: (state, _char, prevChar) => {
       if (prevChar === "*") {
-        state.currentInstruction = {
-          partType: "null",
-          value: "",
-        };
+        finalizeInstruction(
+          state,
+          state.previousInstruction.kind === "nullAwaitingNewLine" &&
+            !state.currentInstruction.value.includes("\n")
+        );
       }
     },
-    equal: doNothing,
-    digit: doNothing,
-    alpha: doNothing,
-    semicolon: doNothing,
-    paren: doNothing,
-    star: doNothing,
-    other: doNothing,
+    equal: addToInstructionValue,
+    digit: addToInstructionValue,
+    operator: addToInstructionValue,
+    alpha: addToInstructionValue,
+    semicolon: addToInstructionValue,
+    paren: addToInstructionValue,
+    star: addToInstructionValue,
+    other: addToInstructionValue,
   },
   label: {
     space: doNothing,
     at: throwDefaultIllegal,
-    newLine: (state) => {},
-    backslash: (state) => {},
-    digit: (state) => {
+    newLine: throwIllegal("Unterminated label"),
+    backslash: throwIllegal("Unterminated label"),
+    digit: (state, char) => {
       if (state.currentInstruction.value.length === 0) {
         throwIllegal("label cannot start with number", state, "digit");
       }
+      addToInstructionValue(state, char);
     },
-    alpha: (state, char) => {
-      state.currentInstruction.value += char;
-    },
+    alpha: addToInstructionValue,
     semicolon: throwDefaultIllegal,
+    operator: throwDefaultIllegal,
     equal: throwDefaultIllegal,
     paren: (state, char) => {
       if (char === ")") {
+        const label = state.currentInstruction.value.trim();
+        if (state.result.symbols[label]) {
+          throwIllegal(
+            (state.result.symbols[label].builtIn
+              ? "Cannot redefine built-in label "
+              : "Duplicate label ") + label,
+            state,
+            char
+          );
+        } else {
+          state.result.symbols[label] = {
+            address: state.result.instructions.length,
+          };
+        }
+
         state.currentInstruction = {
-          partType: "null",
+          kind: "nullAwaitingNewLine",
           value: "",
         };
       } else {
@@ -140,55 +291,142 @@ const HANDLERS: Record<
     other: throwDefaultIllegal,
   },
   A: {
-    space: (state) => {},
-    newLine: (state) => {},
+    space: (state, char) => {
+      if (!state.currentInstruction.value) {
+        return;
+      }
+
+      createAInstruction(state, state.currentInstruction.value);
+      finalizeInstruction(state, false);
+    },
+    newLine: (state) => {
+      if (!state.currentInstruction.value) {
+        throwIllegal("Empty A instruction", state, "\n");
+      }
+
+      createAInstruction(state, state.currentInstruction.value);
+      finalizeInstruction(state, false);
+    },
     at: throwDefaultIllegal,
     equal: throwDefaultIllegal,
-    backslash: (state) => {},
-    digit: (state) => {},
-    alpha: (state) => {},
-    semicolon: (state) => {},
-    paren: (state) => {},
-    star: (state) => {},
+    operator: throwDefaultIllegal,
+    backslash: detectComment,
+    digit: (state, char) => {
+      if (!state.currentInstruction.value) {
+        throwIllegal("Symbol cannot start with number", state, char);
+      }
+      state.currentInstruction.value += char;
+    },
+    alpha: (state, char) => {
+      state.currentInstruction.value += char;
+    },
+    semicolon: throwDefaultIllegal,
+    paren: throwDefaultIllegal,
+    star: throwDefaultIllegal,
     other: throwDefaultIllegal,
   },
-  cComp: {
-    space: (state) => {},
-    newLine: (state) => {},
+  C: {
+    space: doNothing,
+    newLine: (state) => {
+      createCInstruction(state, state.currentInstruction.value);
+
+      finalizeInstruction(state, false);
+    },
     at: throwDefaultIllegal,
     equal: throwDefaultIllegal,
-    backslash: (state) => {},
-    digit: (state) => {},
-    alpha: (state) => {},
-    semicolon: (state) => {},
-    paren: (state) => {},
-    star: (state) => {},
-    other: throwDefaultIllegal,
-  },
-  cDestination: {
-    space: (state) => {},
-    newLine: (state) => {},
-    at: throwDefaultIllegal,
-    equal: throwDefaultIllegal,
-    backslash: (state) => {},
-    digit: (state) => {},
-    alpha: (state) => {},
-    semicolon: (state) => {},
-    paren: (state) => {},
-    star: (state) => {},
-    other: throwDefaultIllegal,
-  },
-  cJump: {
-    space: (state) => {},
-    newLine: (state) => {},
-    at: throwDefaultIllegal,
-    equal: throwDefaultIllegal,
-    backslash: (state) => {},
-    digit: (state) => {},
-    alpha: (state) => {},
-    semicolon: (state) => {},
-    paren: (state) => {},
-    star: (state) => {},
+    operator: (state, char, prevChar, nextChar) => {
+      if(!)
+
+      if (!state.currentInstruction.value) {
+        if(nextChar === '1'){
+          state.currentInstruction.value += char
+          return
+        } else {
+          throwDefaultIllegal(state, char);
+        }
+      }
+
+      if (!state.currentInstruction.value.includes("=")) {
+        throwDefaultIllegal(state, char);
+      }
+
+      if (state.currentInstruction.value.match(/\+|-/g)) {
+        throwDefaultIllegal(state, char);
+      }
+
+      if (!state.currentInstruction.value.match(/[ADM01]$/g)) {
+        throwDefaultIllegal(state, char);
+      }
+
+      state.currentInstruction.value += char;
+    },
+    backslash: (state, char, prevChar, nextChar) => {
+      detectComment(state, char, prevChar, nextChar);
+
+      createCInstruction(state, state.currentInstruction.value);
+
+      finalizeInstruction(state, true);
+    },
+    digit: (state, char, prevChar) => {
+      if (!char.match(/[01]/g)) {
+        throwDefaultIllegal(state, char);
+      }
+
+      if(prevChar === '-'){
+        state.currentInstruction.value += char
+        return
+      }
+
+      if (!state.currentInstruction.value.match(/=([ADM01][+-])?|^$/g)) {
+        throwDefaultIllegal(state, char);
+      }
+
+      state.currentInstruction.value += char;
+    },
+    alpha: (state, char) => {
+      if (!char.match(/[ADMJGETL]/g)) {
+        throwDefaultIllegal(state, char);
+      }
+
+      if (char.match(/[ADM]+$/g)) {
+        if (state.currentInstruction.value.match(/[ADM]+$/g)) {
+          if (state.currentInstruction.value.includes(char)) {
+            throwDefaultIllegal(state, char);
+          }
+          state.currentInstruction.value += char;
+          return;
+        }
+
+        if (!state.currentInstruction.value.match(/[=+-]$/g)) {
+          throwDefaultIllegal(state, char);
+        }
+
+        state.currentInstruction.value += char;
+
+        return;
+      }
+
+      if (char.match(/[JGETL]+$/g)) {
+        if (!state.currentInstruction.value.match(/;[JGETL]*$/g)) {
+          throwDefaultIllegal(state, char);
+        }
+
+        state.currentInstruction.value += char;
+
+        return;
+      }
+    },
+    semicolon: (state, char) => {
+      if (
+        !state.currentInstruction.value.match(
+          /[01ADM]$|[ADM]+=[ADM01]([+-][ADM01])?/
+        )
+      ) {
+        throwDefaultIllegal(state, char);
+      }
+    },
+    paren: throwDefaultIllegal,
+    star: throwDefaultIllegal,
     other: throwDefaultIllegal,
   },
 };
@@ -198,30 +436,55 @@ export const parse = (state: AssemblerState) => {
     state;
   const char = lines[line][position];
   const prevChar = lines[line][position - 1];
+  const nextChar = lines[line][position + 1];
+
+  const handlers = HANDLERS[state.currentInstruction.kind];
 
   if (isFinished || char === undefined) {
-    return {};
+    return handlers.newLine(state, char, prevChar, nextChar);
   }
 
-  const handlers = HANDLERS[state.currentInstruction.partType];
+  createLogger("instruction type", "silent").debug(
+    `Current instruction type ${state.currentInstruction.kind}`
+  );
+
+  const logger = createLogger("handler", "silent");
 
   if (char === "\n") {
-    return handlers.newLine(state, char, prevChar);
+    logger.debug({ kind: "new line", char });
+    return handlers.newLine(state, char, prevChar, nextChar);
+  } else if (char === "@") {
+    logger.debug({ kind: "at", char });
+    return handlers.at(state, char, prevChar, nextChar);
+  } else if (char === "=") {
+    logger.debug({ kind: "equal", char });
+    return handlers.equal(state, char, prevChar, nextChar);
+  } else if (char === "+" || char === "-") {
+    logger.debug({ kind: "operator", char });
+    return handlers.operator(state, char, prevChar, nextChar);
   } else if (char.match(/\s/)) {
-    return handlers.space(state, char, prevChar);
+    logger.debug({ kind: "space", char });
+    return handlers.space(state, char, prevChar, nextChar);
   } else if (char.match(/\d/)) {
-    return handlers.digit(state, char, prevChar);
+    logger.debug({ kind: "digit", char });
+    return handlers.digit(state, char, prevChar, nextChar);
   } else if (char.match(/[a-zA-Z]/)) {
-    return handlers.alpha(state, char, prevChar);
+    logger.debug({ kind: "alpha", char });
+    return handlers.alpha(state, char, prevChar, nextChar);
   } else if (char === "/") {
-    return handlers.backslash(state, char, prevChar);
+    logger.debug({ kind: "backslash", char });
+    return handlers.backslash(state, char, prevChar, nextChar);
   } else if (char === ";") {
-    return handlers.semicolon(state, char, prevChar);
+    logger.debug({ kind: "semicolon", char });
+    return handlers.semicolon(state, char, prevChar, nextChar);
   } else if (char === "(" || char === ")") {
-    return handlers.paren(state, char, prevChar);
+    logger.debug({ kind: "paren", char });
+    return handlers.paren(state, char, prevChar, nextChar);
   } else if (char === "*") {
-    return handlers.star(state, char, prevChar);
+    logger.debug({ kind: "star", char });
+    return handlers.star(state, char, prevChar, nextChar);
   } else {
-    return throwDefaultIllegal(state, char);
+    logger.debug({ kind: "other", char });
+    return handlers.other(state, char, prevChar, nextChar);
   }
 };
